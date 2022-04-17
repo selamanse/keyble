@@ -26,6 +26,17 @@ const {ansi_colorize, wait_milliseconds} = require('./utils.js');
  */
 const {ArgumentParser, generate_input_strings} = require('./cli.js');
 
+const { createLogger, format, transports } = require('winston');
+const { cli } = format;
+
+const logger = createLogger({
+	level: 'debug',
+	format: cli(),
+	transports: [
+	  new transports.Console({ level: 'debug' }),
+	],
+  });
+
 /**
  * The default user name to use when registering new users.
  * @constant
@@ -35,32 +46,33 @@ const DEFAULT_USER_NAME = 'keyble';
 
 const register_user = async (key_card_data_string, user_name) => {
 	// Parse/Decode the information encoded in the QR-Codes on the "Key Card"s
-	console.log(key_card_data_string)
+	logger.info(key_card_data_string)
 	const {address, key, serial} = keyble.key_card.parse(key_card_data_string);
-	console.log(`Registering user on Smart Lock with address "${ansi_colorize(address)}", card key "${ansi_colorize(key)}" and serial "${ansi_colorize(serial)}"...`);
+	logger.info(`Registering user on Smart Lock with address "${ansi_colorize(address)}", card key "${ansi_colorize(key)}" and serial "${ansi_colorize(serial)}"...`);
 	const key_ble = new keyble.Key_Ble({
 		address: address,
 	});
+	logger.info('pairing_request start')
 	const {user_id, user_key} = await key_ble.pairing_request(key);
-	console.log(`User registered!`);
-	console.log(`Use arguments: "${ansi_colorize(`--address ${address} --user_id ${user_id} --user_key ${user_key}`)}"`);
-	console.log(`Setting user name to "${user_name}"...`);
+	logger.info(`User registered!`);
+	logger.info(`Use arguments: "${ansi_colorize(`--address ${address} --user_id ${user_id} --user_key ${user_key}`)}"`);
+	logger.info(`Setting user name to "${user_name}"...`);
 	await key_ble.set_user_name(user_name);
-	console.log(`User name changed!`);
-	console.log(`Finished registering user.`);
+	logger.info(`User name changed!`);
+	logger.info(`Finished registering user.`);
 	await key_ble.disconnect();
 }
 
 const register_users_then_exit = async (qr_code_data, user_name) => {
 	// Print a short message remembering the user that he needs to activate the Smart Lock pairing mode
-	console.log(ansi_colorize('Press and hold "Unlock" button until the yellow light flashes in order to enter pairing mode', '41'));
+	logger.info(ansi_colorize('Press and hold "Unlock" button until the yellow light flashes in order to enter pairing mode', '41'));
 	if (qr_code_data) {
 		// If the QR code was provided on the command line, give the user 10 seconds to press and hold the "unlock" button for pairing
-		console.log("waiting for you to press unlock...")
-		await wait_milliseconds(10000);
+		logger.info("waiting for you to press unlock...")
+		await wait_milliseconds(2000);
 	}
 	try {
-		console.log("trying to register user...")
+		logger.info("trying to register user...")
 		for await (let key_card_data_string of generate_input_strings([qr_code_data], process.stdin)) {
 			await register_user(key_card_data_string, user_name);
 		}

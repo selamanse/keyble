@@ -32,14 +32,20 @@ const SERVICE_UUID = '58e0690015d811e6b7370002a5d5c51b';
 const SEND_CHARACTERISTIC_UUID = '3141dd4015db11e6a24b0002a5d5c51b';
 const RECEIVE_CHARACTERISTIC_UUID = '359d482015db11e682bd0002a5d5c51b';
 
-// TODO remove
-/**
- * Import/require the "noble" module that is being used for Bluetooth communication as "noble".
- * @private
- * @requires noble
- * @see {@link https://github.com/abandonware/noble#readme}
- */
-const noble = require('@abandonware/noble');
+const EventEmitter = require('events');
+
+const { createLogger, format, transports } = require('winston');
+const { simple, errors, combine, cli, prettyPrint } = format;
+
+const logger = createLogger({
+	level: 'debug',
+	format: combine(errors({ stack: true }), simple()),
+	transports: [
+	  new transports.Console({ level: 'debug' }),
+	],
+  });
+const { promisify } = require('util')
+const noble = require('noble');
 
 // Import the required functions from the "utils" submodule.
 const {
@@ -101,19 +107,31 @@ const ensure_noble_is_poweredon = async () => {
  * 
  * 
  */
-const scan_for_noble_peripheral = (is_expected_device_function) => {
-	return ensure_noble_is_poweredon()
-	.then(() => new Promise(async (resolve, reject) => {
-		const on_peripheral_disconvered = async (noble_peripheral) => {
-			if (is_expected_device_function(noble_peripheral)) {
-				await noble.stopScanningAsync();
-				noble.off('discover', on_peripheral_disconvered);
-				resolve(noble_peripheral);
-			}
-		}
-		noble.on('discover', on_peripheral_disconvered);
-		await noble.startScanningAsync();
-	}));
+const scan_for_noble_peripheral = async () => {
+
+	const keyble_found_emitter = new EventEmitter();
+
+	var keybleFound = new Promise( function( resolve ){
+		keyble_found_emitter.on( 'keyble_found', resolve )
+	})
+
+	const on_peripheral_discovered = async (peripheral) => {
+		logger.debug(peripheral)
+		if (peripheral.connectable === true && peripheral.advertisement.localName === "KEY-BLE" && peripheral.id === "d80c61bc623597fa3f35e6fe707fd187") {
+			noble.off('discover', on_peripheral_discovered);
+			logger.info(`found connectable KEY-BLE device ${peripheral.id}`)
+			keyble_found_emitter.emit( 'keyble_found', peripheral)
+			keyble_found_emitter.removeAllListeners( 'keyble_found' )
+			await noble.stopScanningAsync();
+			logger.debug("...scanStopped!")		
+		}	
+	}
+
+	noble.on('discover', on_peripheral_discovered);
+
+	noble.startScanningAsync([SERVICE_UUID], false)
+	logger.debug("startScanning...")
+	return keybleFound
 }
 
 
@@ -151,6 +169,7 @@ const log_event_debug_message = create_log_debug_message_function('keyble:event'
  * @see {@link https://github.com/ricmoo/aes-js#readme}
  */
 const aesjs = require('aes-js');
+const { Peripheral } = require('noble');
 
 /**
  * AES-128-encrypt a byte array in ECB mode.
@@ -325,7 +344,9 @@ const Key_Ble = class extends Event_Emitter {
 	async pairing_request(card_key) {
 		card_key = convert_to_uint8array(card_key);
 		this.user_key = create_random_uint8array(16);
+		logger.debug('nonces_exchanged start')
 		await this.ensure_nonces_exchanged();
+		logger.debug('send_message start')
 		await this.send_message(Pairing_Request_Message.create({
 			user_id: this.user_id,
 			encrypted_pair_key: crypt_data(
@@ -344,6 +365,7 @@ const Key_Ble = class extends Event_Emitter {
 				card_key,
 			),
 		}));
+		logger.debug('await_message start')
 		await this.await_message('ANSWER_WITH_SECURITY');
 		return {
 			user_id: this.user_id,
@@ -493,9 +515,10 @@ const Key_Ble = class extends Event_Emitter {
 
 	async send_message_fragment(message_fragment) {
 		await this.ensure_connected();
+		logger.debug(`sending fragment: ${JSON.stringify(message_fragment)}`)
 		// Somehow, waiting for the Promise to fulfill doesn't work. The FRAGMENT_ACK message is received before the send_characteristic.write() Promise fulfills.
 		//await this.send_characteristic.write(message_fragment.uint8array);
-		this.send_characteristic.write(Buffer.from(message_fragment.uint8array));
+		await this.send_characteristic.write(Buffer.from(message_fragment.uint8array));
 		if (! message_fragment.is_last()) {
 			await this.await_message('FRAGMENT_ACK');
 		}
@@ -534,14 +557,12 @@ const Key_Ble = class extends Event_Emitter {
 		if (this.peripheral) {
 			return this.peripheral;
 		}
-		const peripheral = await scan_for_noble_peripheral((noble_peripheral) => (canonicalize_mac_address(noble_peripheral.address) === this.address));
-		peripheral.once('connect', () => {
-			this.state = CONNECTION_STATE.CONNECTED;
-			this.emit('connected');
-		});
-		await peripheral.connectAsync();
-		const {services:[communication_service], characteristics:[send_characteristic, receive_characteristic]} = await peripheral.discoverSomeServicesAndCharacteristicsAsync([SERVICE_UUID], [SEND_CHARACTERISTIC_UUID, RECEIVE_CHARACTERISTIC_UUID]);
-		peripheral.once('disconnect', () => {
+		logger.debug(`looking for this address: ${this.address}`)
+		const peripheral = await scan_for_noble_peripheral();
+		logger.debug(`FOUND PERIPHERAL = ${peripheral.id}`)		
+
+		peripheral.on('disconnect', () => {
+			logger.debug(`peripheral ${peripheral} disconnected`)
 			this.state = CONNECTION_STATE.DISCONNECTED;
 			receive_characteristic.off('data', on_data_received);
 			this.peripheral = null;
@@ -549,6 +570,24 @@ const Key_Ble = class extends Event_Emitter {
 			this.receive_characteristic = null;
 			this.emit('disconnected');
 		});
+
+		logger.debug("connecting...")
+		await peripheral.connectAsync();
+		this.state = CONNECTION_STATE.CONNECTED;
+		this.emit('connected');
+		logger.debug(`connected: ${peripheral}`)
+
+
+		const {services, characteristics} = await peripheral.discoverSomeServicesAndCharacteristicsAsync([SERVICE_UUID], [SEND_CHARACTERISTIC_UUID, RECEIVE_CHARACTERISTIC_UUID]);
+		
+		logger.debug(services)
+		logger.debug(characteristics)
+  		const receive_characteristic = characteristics[0]
+  		const send_characteristic = characteristics[1]
+
+		logger.debug(receive_characteristic)
+		logger.debug(send_characteristic)
+
 		const on_data_received = (message_fragment_bytes) => {
 			this.on_message_fragment_received(new Message_Fragment(message_fragment_bytes));
 		}
@@ -572,11 +611,17 @@ const Key_Ble = class extends Event_Emitter {
 			return;
 		}
 		this.local_session_nonce = create_random_uint8array(8);
-		await this.send_message(Connection_Request_Message.create({
-			user_id: this.user_id,
-			local_session_nonce: this.local_session_nonce,
-		}));
+		try{
+			await this.send_message(Connection_Request_Message.create({
+				user_id: this.user_id,
+				local_session_nonce: this.local_session_nonce,
+			}));
+		} catch (e) {
+			logger.debug(e)
+		}
+		logger.debug('!!!! start')
 		await this.await_message('CONNECTION_INFO');
+		logger.debug('!!!! start2')
 		this.state = CONNECTION_STATE.NONCES_EXCHANGED;
 		this.emit('nonces_exchanged');
 	}
