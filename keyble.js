@@ -518,8 +518,9 @@ const Key_Ble = class extends Event_Emitter {
 		logger.debug(`sending fragment: ${JSON.stringify(message_fragment)}`)
 		// Somehow, waiting for the Promise to fulfill doesn't work. The FRAGMENT_ACK message is received before the send_characteristic.write() Promise fulfills.
 		//await this.send_characteristic.write(message_fragment.uint8array);
-		await this.send_characteristic.write(Buffer.from(message_fragment.uint8array));
+		this.send_characteristic.write(Buffer.from(message_fragment.uint8array));
 		if (! message_fragment.is_last()) {
+			logger.debug(`waiting...`)
 			await this.await_message('FRAGMENT_ACK');
 		}
 	}
@@ -582,13 +583,14 @@ const Key_Ble = class extends Event_Emitter {
 		
 		logger.debug(services)
 		logger.debug(characteristics)
-  		const receive_characteristic = characteristics[0]
-  		const send_characteristic = characteristics[1]
+  		const receive_characteristic = characteristics[1]
+  		const send_characteristic = characteristics[0]
 
 		logger.debug(receive_characteristic)
 		logger.debug(send_characteristic)
 
 		const on_data_received = (message_fragment_bytes) => {
+			logger.debug(`data received: ${JSON.stringify(message_fragment_bytes)}`)
 			this.on_message_fragment_received(new Message_Fragment(message_fragment_bytes));
 		}
 		receive_characteristic.on('data', on_data_received);
